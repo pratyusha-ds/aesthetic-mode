@@ -1,3 +1,5 @@
+// lib/supabase/types.ts
+
 export type Json =
   | string
   | number
@@ -19,6 +21,7 @@ export interface Database {
           category: string;
           image_url: string;
           description: string | null;
+          event_url: string;
           created_at: string;
           updated_at: string;
         };
@@ -31,6 +34,7 @@ export interface Database {
           category?: string;
           image_url: string;
           description?: string | null;
+          event_url: string;
           created_at?: string;
           updated_at?: string;
         };
@@ -43,6 +47,7 @@ export interface Database {
           category?: string;
           image_url?: string;
           description?: string | null;
+          event_url?: string;
           created_at?: string;
           updated_at?: string;
         };
@@ -51,4 +56,5 @@ export interface Database {
   };
 }
 
-export type FashionEvent = Database['public']['Tables']['fashion_events']['Row'];
+export type FashionEvent =
+  Database["public"]["Tables"]["fashion_events"]["Row"];
