@@ -1,130 +1,137 @@
-'use client';
+/**
+ * @fileoverview Root Home page for the Aesthetic Mode application.
+ * Manages the global state for fashion events, coordinates Supabase data fetching, and handles UI-level events
+ * like click-outside dismissal for sidebars.
+ * @module Home
+ */
 
-import { useState, useEffect } from 'react';
-import { EventCard } from '@/components/event-card';
-import { AIConcierge } from '@/components/ai-concierge';
-import { supabase } from '@/lib/supabase/client';
-import type { FashionEvent } from '@/lib/supabase/types';
-import { Sparkles } from 'lucide-react';
+"use client";
 
-const categories = [
-  { id: 'all', label: 'All Events' },
-  { id: 'london', label: 'London' },
-  { id: 'manchester', label: 'Manchester' },
-  { id: 'sample-sale', label: 'Sample Sales' },
-  { id: 'exhibition', label: 'Exhibitions' },
-];
+import { useState, useEffect, useCallback, useRef } from "react";
+import { EventCard } from "@/components/event-card";
+import { AIConcierge } from "@/components/ai-concierge";
+import { SiteHeader } from "@/components/site-header";
+import { FilterSidebar } from "@/components/filter-sidebar";
+import { supabase } from "@/lib/supabase/client";
+import { locationOptions, mainCities } from "@/lib/constants/locations";
+import type { FashionEvent } from "@/lib/supabase/types";
 
 export default function Home() {
   const [events, setEvents] = useState<FashionEvent[]>([]);
-  const [filteredEvents, setFilteredEvents] = useState<FashionEvent[]>([]);
-  const [activeCategory, setActiveCategory] = useState('all');
   const [loading, setLoading] = useState(true);
+  const [isFilterOpen, setIsFilterOpen] = useState(false);
+  const [advancedFilters, setAdvancedFilters] = useState({
+    timeframes: [] as string[],
+    locations: [] as string[],
+  });
+
+  const filterContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    fetchEvents();
-  }, []);
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        isFilterOpen &&
+        filterContainerRef.current &&
+        !filterContainerRef.current.contains(event.target as Node)
+      ) {
+        setIsFilterOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [isFilterOpen]);
 
-  useEffect(() => {
-    filterEvents();
-  }, [activeCategory, events]);
-
-  async function fetchEvents() {
+  const fetchEvents = useCallback(async () => {
     try {
-      const { data, error } = await supabase
-        .from('fashion_events')
-        .select('*')
-        .order('date', { ascending: true });
-
+      setLoading(true);
+      let query = supabase.from("fashion_events").select("*");
+      if (advancedFilters.locations.length > 0) {
+        const isRuralSelected =
+          advancedFilters.locations.includes("rural_hidden_gems");
+        const selectedCities = advancedFilters.locations.flatMap(
+          (id) => locationOptions.find((opt) => opt.id === id)?.cities || [],
+        );
+        if (isRuralSelected && selectedCities.length > 0) {
+          query = query.or(
+            `city.in.(${selectedCities.join(",")}),city.not.in.(${mainCities.join(",")})`,
+          );
+        } else if (isRuralSelected) {
+          query = query.not("city", "in", `(${mainCities.join(",")})`);
+        } else if (selectedCities.length > 0) {
+          query = query.in("city", selectedCities);
+        }
+      }
+      const todayStr = new Date().toISOString().split("T")[0];
+      if (advancedFilters.timeframes.length > 0) {
+        const filters: string[] = [];
+        if (advancedFilters.timeframes.includes("today"))
+          filters.push(`date.eq.${todayStr}`);
+        if (advancedFilters.timeframes.includes("upcoming"))
+          filters.push(`date.gt.${todayStr}`);
+        if (advancedFilters.timeframes.includes("past"))
+          filters.push(`date.lt.${todayStr}`);
+        if (filters.length > 0) query = query.or(filters.join(","));
+      }
+      const { data, error } = await query.order("date", { ascending: true });
       if (error) throw error;
       setEvents(data || []);
     } catch (error) {
-      console.error('Error fetching events:', error);
+      console.error("Error fetching events:", error);
     } finally {
       setLoading(false);
     }
-  }
+  }, [advancedFilters]);
 
-  function filterEvents() {
-    if (activeCategory === 'all') {
-      setFilteredEvents(events);
-    } else if (activeCategory === 'london' || activeCategory === 'manchester') {
-      setFilteredEvents(
-        events.filter(event =>
-          event.city.toLowerCase() === activeCategory.toLowerCase()
-        )
-      );
-    } else {
-      setFilteredEvents(
-        events.filter(event => event.category === activeCategory)
-      );
-    }
-  }
+  useEffect(() => {
+    fetchEvents();
+  }, [fetchEvents]);
+
+  const toggleFilter = (key: "timeframes" | "locations", value: string) => {
+    setAdvancedFilters((prev) => ({
+      ...prev,
+      [key]: prev[key].includes(value)
+        ? prev[key].filter((v) => v !== value)
+        : [...prev[key], value],
+    }));
+  };
+
+  const setQuickTimeframe = (id: string) => {
+    setAdvancedFilters((prev) => ({
+      ...prev,
+      timeframes: id === "all" ? [] : [id],
+    }));
+  };
 
   return (
-    <div className="min-h-screen">
-      <header className="border-b bg-card/50 backdrop-blur-sm sticky top-0 z-40">
-        <div className="container mx-auto px-6 py-6">
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div className="h-12 w-12 rounded-full bg-primary/10 flex items-center justify-center">
-                <Sparkles className="h-6 w-6 text-primary" />
-              </div>
-              <div>
-                <h1 className="font-serif text-3xl font-bold text-foreground">
-                  UK Fashion Events
-                </h1>
-                <p className="text-sm text-muted-foreground">
-                  Discover premium fashion experiences
-                </p>
-              </div>
-            </div>
-          </div>
+    <div className="min-h-screen bg-background relative">
+      <SiteHeader
+        advancedFilters={advancedFilters}
+        setQuickTimeframe={setQuickTimeframe}
+      />
 
-          <nav className="flex gap-2 overflow-x-auto pb-2">
-            {categories.map((category) => (
-              <button
-                key={category.id}
-                onClick={() => setActiveCategory(category.id)}
-                className={`px-5 py-2.5 rounded-full text-sm font-medium whitespace-nowrap transition-all duration-200 ${
-                  activeCategory === category.id
-                    ? 'bg-primary text-primary-foreground shadow-md'
-                    : 'bg-card hover:bg-muted text-muted-foreground hover:text-foreground border'
-                }`}
-              >
-                {category.label}
-              </button>
-            ))}
-          </nav>
-        </div>
-      </header>
+      <FilterSidebar
+        isFilterOpen={isFilterOpen}
+        setIsFilterOpen={setIsFilterOpen}
+        filterContainerRef={filterContainerRef}
+        advancedFilters={advancedFilters}
+        toggleFilter={toggleFilter}
+      />
 
-      <main className="container mx-auto px-6 py-12">
+      <main className="container mx-auto px-4 py-8 md:px-6">
         {loading ? (
-          <div className="flex items-center justify-center min-h-[400px]">
-            <div className="text-center space-y-4">
-              <div className="h-12 w-12 rounded-full border-4 border-primary/20 border-t-primary animate-spin mx-auto" />
-              <p className="text-muted-foreground">Loading events...</p>
-            </div>
+          <div className="flex items-center justify-center min-h-100">
+            <div className="h-8 w-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
           </div>
-        ) : filteredEvents.length === 0 ? (
+        ) : events.length === 0 ? (
           <div className="text-center py-20">
-            <div className="h-20 w-20 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
-              <Sparkles className="h-10 w-10 text-muted-foreground" />
-            </div>
-            <h2 className="font-serif text-2xl font-semibold mb-2">No events found</h2>
-            <p className="text-muted-foreground mb-6">
-              {activeCategory === 'all'
-                ? 'No events are currently available. Check back soon!'
-                : `No ${categories.find(c => c.id === activeCategory)?.label} events available at the moment.`}
-            </p>
+            <h2 className="font-serif text-lg text-muted-foreground">
+              No events found for these filters.
+            </h2>
           </div>
         ) : (
-          <div className="columns-1 md:columns-2 lg:columns-3 xl:columns-4 gap-6 space-y-6">
-            {filteredEvents.map((event) => (
-              <div key={event.id} className="break-inside-avoid">
-                <EventCard event={event} />
-              </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6 items-start">
+            {events.map((event) => (
+              <EventCard key={event.id} event={event} />
             ))}
           </div>
         )}
