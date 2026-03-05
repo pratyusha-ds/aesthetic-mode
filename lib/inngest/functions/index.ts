@@ -1,6 +1,6 @@
 /**
- * @fileoverview Fashion event scraper and database synchronization.
- * Uses Exa for regional search and Gemini for sequential data drip-feeding.
+ * @fileoverview Optimized Fashion event scraper.
+ * Batches regional results to stay within Gemini Free Tier quotas.
  */
 
 import { inngest } from "../client";
@@ -13,10 +13,6 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_ROLE_KEY!,
 );
 
-/**
- * Main worker function.
- * Runs on 'scout/run' event or daily cron (3 AM).
- */
 export const scoutFunction = inngest.createFunction(
   { id: "scout-uk-fashion" },
   [{ event: "scout/run" }, { cron: "0 3 * * *" }],
@@ -48,108 +44,107 @@ export const scoutFunction = inngest.createFunction(
         },
         {
           id: "rural_hidden_gems",
-          q: "UK designer fashion sample sales pop-ups -London -Manchester -Birmingham -Leeds -Glasgow -Liverpool -Edinburgh -Bristol -Belfast -Nottingham -Sheffield -Newcastle",
+          q: "UK designer fashion boutique sales in smaller towns like Harrogate, Oxford, St Ives",
         },
       ];
 
-      const searchTasks = regions.map((region) =>
-        step.run(`search-${region.id}`, async () => {
-          const res = await exa.search(`${region.q} ${currentYear}`, {
-            type: "auto",
-            numResults: 20,
-            contents: { text: { maxCharacters: 1000 } },
-          });
-          return { region: region.id, results: res.results };
-        }),
+      const allSearchResults = await step.run(
+        "gather-all-search-data",
+        async () => {
+          const results = await Promise.all(
+            regions.map(async (region) => {
+              const res = await exa.search(`${region.q} ${currentYear}`, {
+                type: "auto",
+                numResults: 10,
+                contents: { text: { maxCharacters: 800 } },
+              });
+              return res.results.map((r) => ({ ...r, regionId: region.id }));
+            }),
+          );
+          return results.flat();
+        },
       );
 
-      const allRegionalResults = await Promise.all(searchTasks);
+      const allCleanedEvents = await step.run(
+        "batch-clean-with-ai",
+        async () => {
+          if (allSearchResults.length === 0) return [];
 
-      let allCleanedEvents: any[] = [];
+          const inputForAI = allSearchResults.map((r) => ({
+            title: r.title,
+            url: r.url,
+            text: r.text.substring(0, 600),
+            region: r.regionId,
+          }));
 
-      for (const batch of allRegionalResults) {
-        if (batch.results.length === 0) continue;
+          const prompt = `You are a UK Fashion Editor. Extract all fashion events from this data: ${JSON.stringify(inputForAI)}.
+        Current Date: ${today}.
+        INSTRUCTIONS:
+        1. Capture past and upcoming events.
+        2. Format date as YYYY-MM-DD.
+        3. For 'rural_hidden_gems', ensure they are NOT in major cities.
+        4. For 'image_url', only use direct links ending in .jpg, .jpeg, .png, .webp, or .avif. Otherwise return null.`;
 
-        const cleanedBatch = await step.run(
-          `clean-${batch.region}`,
-          async () => {
-            const inputForAI = batch.results.map((r) => ({
-              title: r.title,
-              url: r.url,
-              text: r.text.substring(0, 800),
-            }));
-
-            const focusInstruction =
-              batch.region === "rural_hidden_gems"
-                ? "FOCUS: Look for independent boutique sales in smaller UK towns (e.g., Harrogate, Cheltenham, Oxford, St Ives). Discard major city results."
-                : `FOCUS: Extract events specifically for the ${batch.region} region.`;
-
-            const prompt = `You are a UK Fashion Editor. Extract all fashion events (past and upcoming) from this data: ${JSON.stringify(inputForAI)}.
-          Current Date: ${today}.
-          ${focusInstruction}
-          Capture the event even if the date has passed so we can archive it.
-          Format date as YYYY-MM-DD. Always include the 'city' field.`;
-
-            const result = await model.generateContent({
-              contents: [{ role: "user", parts: [{ text: prompt }] }],
-              generationConfig: {
-                responseMimeType: "application/json",
-                responseSchema: {
-                  type: SchemaType.OBJECT,
-                  properties: {
-                    events: {
-                      type: SchemaType.ARRAY,
-                      items: {
-                        type: SchemaType.OBJECT,
-                        properties: {
-                          title: { type: SchemaType.STRING },
-                          date: { type: SchemaType.STRING },
-                          location: { type: SchemaType.STRING },
-                          city: { type: SchemaType.STRING },
-                          category: { type: SchemaType.STRING },
-                          image_url: { type: SchemaType.STRING },
-                          description: { type: SchemaType.STRING },
-                          event_url: { type: SchemaType.STRING },
-                        },
-                        required: ["title", "date", "event_url", "city"],
+          const result = await model.generateContent({
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: SchemaType.OBJECT,
+                properties: {
+                  events: {
+                    type: SchemaType.ARRAY,
+                    items: {
+                      type: SchemaType.OBJECT,
+                      properties: {
+                        title: { type: SchemaType.STRING },
+                        date: { type: SchemaType.STRING },
+                        location: { type: SchemaType.STRING },
+                        city: { type: SchemaType.STRING },
+                        category: { type: SchemaType.STRING },
+                        image_url: { type: SchemaType.STRING },
+                        description: { type: SchemaType.STRING },
+                        event_url: { type: SchemaType.STRING },
                       },
+                      required: ["title", "date", "event_url", "city"],
                     },
                   },
                 },
               },
-            });
+            },
+          });
 
-            const parsed = JSON.parse(result.response.text());
-            return parsed.events || [];
-          },
-        );
+          const parsed = JSON.parse(result.response.text());
+          const rawEvents = parsed.events || [];
+          const imageRegex = /\.(jpg|jpeg|png|webp|avif|gif)($|\?)/i;
 
-        allCleanedEvents = [...allCleanedEvents, ...cleanedBatch];
-      }
+          return rawEvents.map((event: any) => ({
+            ...event,
+            image_url:
+              event.image_url && imageRegex.test(event.image_url)
+                ? event.image_url
+                : null,
+          }));
+        },
+      );
 
       const dbResult = await step.run("save-to-supabase", async () => {
         if (allCleanedEvents.length === 0) return { count: 0 };
-
         const { error, data } = await supabase
           .from("fashion_events")
-          .upsert(allCleanedEvents, {
-            onConflict: "event_url",
-            ignoreDuplicates: false,
-          })
+          .upsert(allCleanedEvents, { onConflict: "event_url" })
           .select();
-
         if (error) throw error;
         return { count: data?.length || 0 };
       });
 
       return {
-        message: "National Scout Successful",
-        regionsProcessed: regions.length,
+        success: true,
         totalFound: allCleanedEvents.length,
-        newOrUpdated: dbResult.count,
+        upserted: dbResult.count,
       };
     } catch (error: any) {
-      logger.error("National Scout Failed", { message: error.message });
+      logger.error("Scout Failed", { message: error.message });
       throw error;
     }
   },
